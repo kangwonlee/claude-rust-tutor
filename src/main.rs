@@ -7,17 +7,15 @@
 //! Drop-in replacement for `gemini-python-tutor/entrypoint.py` — same env
 //! var contract, same output destination (`$GITHUB_STEP_SUMMARY` appended
 //! by the calling workflow).
-//!
-//! v0.1 scaffold: env parsing wired; provider dispatch + prompt + HTTP
-//! TBD in subsequent commits.
 
 use std::env;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-mod locale;
-mod sanitize;
-mod prompt;
 mod llm;
+mod locale;
+mod prompt;
+mod sanitize;
 
 fn main() -> ExitCode {
     env_logger::init();
@@ -35,16 +33,51 @@ fn main() -> ExitCode {
     log::info!("readme: {:?}", inputs.readme);
     log::info!("explanation in: {}", inputs.explanation_in);
 
-    // TODO v0.1.1+: build prompt, pick provider, call LLM, emit feedback.
-    eprintln!("claude-rust-tutor v0.1.0 scaffold — provider dispatch not yet implemented");
-    ExitCode::from(0)
+    let report_refs: Vec<&std::path::Path> = inputs.report_files.iter().map(PathBuf::as_path).collect();
+    let student_refs: Vec<&std::path::Path> = inputs.student_files.iter().map(PathBuf::as_path).collect();
+
+    let (n_failed, prompt_text) = match prompt::build(
+        &report_refs,
+        &student_refs,
+        &inputs.readme,
+        &inputs.explanation_in,
+    ) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("prompt build error: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    log::info!("prompt built: {n_failed} failed test(s), {} chars", prompt_text.len());
+
+    let provider = match llm::select_from_env() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("provider selection error: {e}");
+            return ExitCode::from(4);
+        }
+    };
+    log::info!("provider: {}", provider.label());
+
+    match llm::call_api(&provider, &prompt_text) {
+        Ok(feedback) => {
+            println!("{feedback}");
+            // Mirror python tutor's exit-code policy: zero on success even if
+            // tests failed (the autograder reports score separately).
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            eprintln!("LLM call error: {e}");
+            ExitCode::from(5)
+        }
+    }
 }
 
 #[derive(Debug)]
 struct Inputs {
-    report_files: Vec<String>,
-    student_files: Vec<String>,
-    readme: String,
+    report_files: Vec<PathBuf>,
+    student_files: Vec<PathBuf>,
+    readme: PathBuf,
     explanation_in: String,
     github_repo: String,
     fail_expected: bool,
@@ -54,9 +87,9 @@ struct Inputs {
 impl Inputs {
     fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            report_files: split_csv(&env::var("INPUT_REPORT-FILES")?),
-            student_files: split_csv(&env::var("INPUT_STUDENT-FILES")?),
-            readme: env::var("INPUT_README-PATH")?,
+            report_files: split_csv(&env::var("INPUT_REPORT-FILES")?).into_iter().map(PathBuf::from).collect(),
+            student_files: split_csv(&env::var("INPUT_STUDENT-FILES")?).into_iter().map(PathBuf::from).collect(),
+            readme: PathBuf::from(env::var("INPUT_README-PATH")?),
             explanation_in: env::var("INPUT_EXPLANATION-IN").unwrap_or_else(|_| "English".into()),
             github_repo: env::var("GITHUB_REPOSITORY").unwrap_or_else(|_| "unknown/repository".into()),
             fail_expected: env::var("INPUT_FAIL-EXPECTED")

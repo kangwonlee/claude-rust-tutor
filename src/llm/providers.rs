@@ -1,14 +1,13 @@
-//! Provider configs — to be filled in v0.1.1.
+//! Provider configs — port of llm_configs.py's 5 dataclasses.
 //!
-//! One config per provider, each implementing `LlmConfig`. Mirrors
-//! llm_configs.py's 5 dataclasses: GeminiConfig (default), GrokConfig,
-//! NvidiaNIMConfig, ClaudeConfig, PerplexityConfig.
-
-#![allow(dead_code)] // scaffold
+//! Each variant carries (api_key, model) and implements the four hooks
+//! the generic client needs: `api_url`, `headers`, `body`, `parse`.
 
 use std::env;
 
-#[derive(Debug)]
+use serde_json::{Value, json};
+
+#[derive(Debug, Clone)]
 pub enum Provider {
     Gemini { api_key: String, model: String },
     Claude { api_key: String, model: String },
@@ -17,12 +16,143 @@ pub enum Provider {
     Perplexity { api_key: String, model: String },
 }
 
-/// Mirror python's `get_model_key_from_env()` — first non-empty key wins,
-/// in the fallback order from llm_utils.py.
+impl Provider {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Provider::Gemini { .. } => "Gemini",
+            Provider::Claude { .. } => "Claude",
+            Provider::Grok { .. } => "Grok",
+            Provider::NvidiaNim { .. } => "NvidiaNIM",
+            Provider::Perplexity { .. } => "Perplexity",
+        }
+    }
+
+    /// POST endpoint URL. Gemini embeds the API key in the URL.
+    pub fn api_url(&self) -> String {
+        match self {
+            Provider::Gemini { api_key, model } => format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            ),
+            Provider::Claude { .. } => "https://api.anthropic.com/v1/messages".into(),
+            Provider::Grok { .. } => "https://api.x.ai/v1/chat/completions".into(),
+            Provider::NvidiaNim { .. } => "https://integrate.api.nvidia.com/v1/chat/completions".into(),
+            Provider::Perplexity { .. } => "https://api.perplexity.ai/chat/completions".into(),
+        }
+    }
+
+    /// Provider-specific headers. Returned as `(name, value)` pairs so the
+    /// caller can build a `reqwest::HeaderMap`.
+    pub fn headers(&self) -> Vec<(&'static str, String)> {
+        match self {
+            Provider::Gemini { .. } => vec![("Content-Type", "application/json".into())],
+            Provider::Claude { api_key, .. } => vec![
+                ("x-api-key", api_key.trim().into()),
+                ("anthropic-version", "2023-06-01".into()),
+                ("Content-Type", "application/json".into()),
+            ],
+            Provider::Grok { api_key, .. }
+            | Provider::NvidiaNim { api_key, .. }
+            | Provider::Perplexity { api_key, .. } => vec![
+                ("Authorization", format!("Bearer {}", api_key.trim())),
+                ("Content-Type", "application/json".into()),
+            ],
+        }
+    }
+
+    pub fn body(&self, prompt: &str) -> Value {
+        match self {
+            Provider::Gemini { .. } => json!({
+                "contents": [{"parts": [{"text": prompt}]}]
+            }),
+            Provider::Grok { model, .. } => json!({
+                "messages": [{"role": "user", "content": prompt}],
+                "model": model,
+                "stream": false,
+                "temperature": 0,
+            }),
+            Provider::NvidiaNim { model, .. } => json!({
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+                "top_p": 0.7,
+                "max_tokens": 96,
+                "stream": false,
+            }),
+            Provider::Claude { model, .. } => {
+                let max_tokens = 1024;
+                json!({
+                    "model": model,
+                    "messages": [{
+                        "role": "user",
+                        "content": format!("Please answer within {max_tokens} tokens\n{prompt}")
+                    }],
+                    "temperature": 0.2,
+                    "top_p": 0.7,
+                    "max_tokens": max_tokens,
+                    "stream": false,
+                })
+            }
+            Provider::Perplexity { model, .. } => {
+                let max_tokens = 384;
+                let half = max_tokens / 2;
+                let resolved = match model.as_str() {
+                    "sonar-deep-research" | "sonar-reasoning-pro" | "sonar-reasoning"
+                    | "sonar-pro" | "sonar" => model.as_str(),
+                    _ => "sonar",
+                };
+                json!({
+                    "model": resolved,
+                    "messages": [{
+                        "role": "user",
+                        "content": format!("Please answer within {half} tokens.Do not include code.\n{prompt}")
+                    }],
+                    "temperature": 0.2,
+                    "top_p": 0.7,
+                    "max_tokens": max_tokens,
+                    "stream": false,
+                })
+            }
+        }
+    }
+
+    pub fn parse(&self, response: &Value) -> anyhow::Result<String> {
+        match self {
+            Provider::Gemini { .. } => {
+                let parts = response
+                    .pointer("/candidates/0/content/parts")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| anyhow::anyhow!("gemini: missing candidates[0].content.parts"))?;
+                let mut chunks = Vec::with_capacity(parts.len());
+                for p in parts {
+                    let t = p
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow::anyhow!("gemini: missing parts[].text"))?;
+                    chunks.push(t.to_string());
+                }
+                Ok(chunks.join("\n"))
+            }
+            Provider::Claude { .. } => response
+                .pointer("/content/0/text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("claude: missing content[0].text")),
+            Provider::Grok { .. }
+            | Provider::NvidiaNim { .. }
+            | Provider::Perplexity { .. } => response
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("{}: missing choices[0].message.content", self.label())),
+        }
+    }
+}
+
+/// Mirror python's provider-selection order: Gemini → Claude → Grok → Nvidia → Perplexity.
+/// First non-empty `INPUT_*_API_KEY` wins. `INPUT_MODEL` overrides the per-provider default.
 pub fn select_from_env() -> anyhow::Result<Provider> {
     let model_override = env::var("INPUT_MODEL").ok().filter(|s| !s.is_empty());
 
-    // Order matches python tutor's fallback chain.
     if let Some(key) = nonempty("INPUT_GEMINI-API-KEY") {
         return Ok(Provider::Gemini {
             api_key: key,
@@ -58,4 +188,64 @@ pub fn select_from_env() -> anyhow::Result<Provider> {
 
 fn nonempty(name: &str) -> Option<String> {
     env::var(name).ok().filter(|s| !s.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_url_embeds_key_and_model() {
+        let p = Provider::Gemini { api_key: "K".into(), model: "gemini-2.5-flash".into() };
+        let url = p.api_url();
+        assert!(url.contains("gemini-2.5-flash:generateContent"));
+        assert!(url.ends_with("?key=K"));
+    }
+
+    #[test]
+    fn claude_headers_carry_api_key_and_version() {
+        let p = Provider::Claude { api_key: "K".into(), model: "claude-sonnet-4-20250514".into() };
+        let hs = p.headers();
+        assert!(hs.iter().any(|(k, v)| *k == "x-api-key" && v == "K"));
+        assert!(hs.iter().any(|(k, v)| *k == "anthropic-version" && v == "2023-06-01"));
+    }
+
+    #[test]
+    fn grok_body_includes_model_and_temp_zero() {
+        let p = Provider::Grok { api_key: "K".into(), model: "grok-code-fast".into() };
+        let b = p.body("hi");
+        assert_eq!(b["model"], "grok-code-fast");
+        assert_eq!(b["temperature"], 0);
+        assert_eq!(b["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn perplexity_model_fallback_to_sonar() {
+        let p = Provider::Perplexity { api_key: "K".into(), model: "made-up-model".into() };
+        let b = p.body("hi");
+        assert_eq!(b["model"], "sonar");
+    }
+
+    #[test]
+    fn gemini_parses_candidates_parts() {
+        let p = Provider::Gemini { api_key: "K".into(), model: "gemini-2.5-flash".into() };
+        let r = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": "hello"}, {"text": "world"}]}}]
+        });
+        assert_eq!(p.parse(&r).unwrap(), "hello\nworld");
+    }
+
+    #[test]
+    fn claude_parses_content_text() {
+        let p = Provider::Claude { api_key: "K".into(), model: "claude-sonnet-4-20250514".into() };
+        let r = serde_json::json!({"content": [{"text": "ok"}]});
+        assert_eq!(p.parse(&r).unwrap(), "ok");
+    }
+
+    #[test]
+    fn grok_parses_choices_content() {
+        let p = Provider::Grok { api_key: "K".into(), model: "grok-code-fast".into() };
+        let r = serde_json::json!({"choices": [{"message": {"content": "ok"}}]});
+        assert_eq!(p.parse(&r).unwrap(), "ok");
+    }
 }

@@ -36,6 +36,9 @@ include_dir = "0.7"
 # Ergonomic error handling at the boundaries.
 anyhow = "1"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 # Size-tuned release profile for a small static binary in a scratch image.
 strip = true
