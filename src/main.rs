@@ -85,14 +85,24 @@ struct Inputs {
 }
 
 impl Inputs {
+    // NOTE: all env-var names use UNDERSCORES, not hyphens. A hyphenated
+    // name inherited from the process *startup* environment is invisible to
+    // `std::env::var` / `std::env::vars_os` — libstd drops `-`-containing
+    // names from its inherited-environ snapshot. `docker run -e
+    // "INPUT_FOO-BAR=x"` DOES put the entry into the container `environ`
+    // (shell `printenv` sees it), but Rust does not, so the read below
+    // returns `environment variable not found` and the `?` aborts startup.
+    // (This filtering applies only to inherited vars, not ones set in-process
+    // via `env::set_var`.) Keep these names in sync with the `-e` flags in
+    // rust-homework-template-custom/.github/workflows/classroom.yml.
     fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            report_files: split_csv(&env::var("INPUT_REPORT-FILES")?).into_iter().map(PathBuf::from).collect(),
-            student_files: split_csv(&env::var("INPUT_STUDENT-FILES")?).into_iter().map(PathBuf::from).collect(),
-            readme: PathBuf::from(env::var("INPUT_README-PATH")?),
-            explanation_in: env::var("INPUT_EXPLANATION-IN").unwrap_or_else(|_| "English".into()),
+            report_files: split_csv(&env::var("INPUT_REPORT_FILES")?).into_iter().map(PathBuf::from).collect(),
+            student_files: split_csv(&env::var("INPUT_STUDENT_FILES")?).into_iter().map(PathBuf::from).collect(),
+            readme: PathBuf::from(env::var("INPUT_README_PATH")?),
+            explanation_in: env::var("INPUT_EXPLANATION_IN").unwrap_or_else(|_| "English".into()),
             github_repo: env::var("GITHUB_REPOSITORY").unwrap_or_else(|_| "unknown/repository".into()),
-            fail_expected: env::var("INPUT_FAIL-EXPECTED")
+            fail_expected: env::var("INPUT_FAIL_EXPECTED")
                 .map(|v| v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             model_override: env::var("INPUT_MODEL").ok().filter(|s| !s.is_empty()),

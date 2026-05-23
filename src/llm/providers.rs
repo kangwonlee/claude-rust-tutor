@@ -150,10 +150,16 @@ impl Provider {
 
 /// Mirror python's provider-selection order: Gemini → Claude → Grok → Nvidia → Perplexity.
 /// First non-empty `INPUT_*_API_KEY` wins. `INPUT_MODEL` overrides the per-provider default.
+///
+/// All names use UNDERSCORES, not hyphens: a hyphenated name inherited from
+/// the process startup environment is invisible to `std::env::var` (libstd
+/// drops `-`-containing names from its inherited environ), so a hyphenated
+/// key is unreadable here even when `docker run -e` set it. See
+/// `Inputs::from_env`.
 pub fn select_from_env() -> anyhow::Result<Provider> {
     let model_override = env::var("INPUT_MODEL").ok().filter(|s| !s.is_empty());
 
-    if let Some(key) = nonempty("INPUT_GEMINI-API-KEY") {
+    if let Some(key) = nonempty("INPUT_GEMINI_API_KEY") {
         return Ok(Provider::Gemini {
             api_key: key,
             model: model_override.unwrap_or_else(|| "gemini-2.5-flash".into()),
@@ -165,19 +171,19 @@ pub fn select_from_env() -> anyhow::Result<Provider> {
             model: model_override.unwrap_or_else(|| "claude-sonnet-4-20250514".into()),
         });
     }
-    if let Some(key) = nonempty("INPUT_GROK-API-KEY") {
+    if let Some(key) = nonempty("INPUT_GROK_API_KEY") {
         return Ok(Provider::Grok {
             api_key: key,
             model: model_override.unwrap_or_else(|| "grok-code-fast".into()),
         });
     }
-    if let Some(key) = nonempty("INPUT_NVIDIA-API-KEY") {
+    if let Some(key) = nonempty("INPUT_NVIDIA_API_KEY") {
         return Ok(Provider::NvidiaNim {
             api_key: key,
             model: model_override.unwrap_or_else(|| "google/gemma-2-9b-it".into()),
         });
     }
-    if let Some(key) = nonempty("INPUT_PERPLEXITY-API-KEY") {
+    if let Some(key) = nonempty("INPUT_PERPLEXITY_API_KEY") {
         return Ok(Provider::Perplexity {
             api_key: key,
             model: model_override.unwrap_or_else(|| "sonar".into()),
@@ -247,5 +253,41 @@ mod tests {
         let p = Provider::Grok { api_key: "K".into(), model: "grok-code-fast".into() };
         let r = serde_json::json!({"choices": [{"message": {"content": "ok"}}]});
         assert_eq!(p.parse(&r).unwrap(), "ok");
+    }
+
+    // Regression for the empty-feedback bug: the env contract must use
+    // UNDERSCORE names, because a hyphenated name inherited from the process
+    // startup environment (as `docker run -e "INPUT_X-Y=..."` produces) is
+    // invisible to `std::env::var` — it is dropped from Rust's startup env
+    // snapshot. This test asserts the underscore Claude key resolves.
+    //
+    // NB: the hyphen-invisibility itself cannot be reproduced in-process —
+    // `env::set_var("A-B", ..)` followed by `env::var("A-B")` DOES read back,
+    // because libstd only filters the *inherited* environ, not vars set after
+    // startup. The invisibility is proven out-of-process in the task's docker
+    // repro; here we just lock in that the underscore selector works.
+    #[test]
+    fn select_from_env_uses_underscore_names() {
+        // SAFETY: single-threaded within this test; we set then remove the
+        // vars we touch, leaving process env as we found it.
+        unsafe {
+            // Clear any provider keys that might leak from the runner env.
+            for k in ["INPUT_GEMINI_API_KEY", "INPUT_CLAUDE_API_KEY",
+                      "INPUT_GROK_API_KEY", "INPUT_NVIDIA_API_KEY",
+                      "INPUT_PERPLEXITY_API_KEY", "INPUT_MODEL"] {
+                env::remove_var(k);
+            }
+            env::set_var("INPUT_CLAUDE_API_KEY", "sk-test");
+        }
+
+        let p = select_from_env().expect("underscore claude key should resolve");
+        match p {
+            Provider::Claude { api_key, .. } => assert_eq!(api_key, "sk-test"),
+            other => panic!("expected Claude provider, got {other:?}"),
+        }
+
+        unsafe {
+            env::remove_var("INPUT_CLAUDE_API_KEY");
+        }
     }
 }

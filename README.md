@@ -29,25 +29,32 @@ Same five providers as `gemini-python-tutor`, default order picks whichever API 
 
 | Provider | Env var (selector) | Default model |
 |---|---|---|
-| Gemini (default) | `INPUT_GEMINI-API-KEY` | `gemini-2.5-flash` |
+| Gemini (default) | `INPUT_GEMINI_API_KEY` | `gemini-2.5-flash` |
 | Claude | `INPUT_CLAUDE_API_KEY` | `claude-sonnet-4-20250514` |
-| Grok | `INPUT_GROK-API-KEY` | `grok-code-fast` |
-| NVIDIA NIM | `INPUT_NVIDIA-API-KEY` | `google/gemma-2-9b-it` |
-| Perplexity | `INPUT_PERPLEXITY-API-KEY` | `sonar` |
+| Grok | `INPUT_GROK_API_KEY` | `grok-code-fast` |
+| NVIDIA NIM | `INPUT_NVIDIA_API_KEY` | `google/gemma-2-9b-it` |
+| Perplexity | `INPUT_PERPLEXITY_API_KEY` | `sonar` |
 
 ## Env var contract
 
-Identical to `gemini-python-tutor` for drop-in replaceability:
-
 | Env var | Meaning |
 |---|---|
-| `INPUT_REPORT-FILES` | Comma-separated paths to `pytest-json-report`-shape JSONs |
-| `INPUT_STUDENT-FILES` | Comma-separated paths to student source files |
-| `INPUT_README-PATH` | Path to assignment README |
-| `INPUT_EXPLANATION-IN` | Locale name (e.g. `Korean`, `English`) |
+| `INPUT_REPORT_FILES` | Comma-separated paths to `pytest-json-report`-shape JSONs |
+| `INPUT_STUDENT_FILES` | Comma-separated paths to student source files |
+| `INPUT_README_PATH` | Path to assignment README |
+| `INPUT_EXPLANATION_IN` | Locale name (e.g. `Korean`, `English`) |
 | `INPUT_MODEL` | Optional model override |
-| `INPUT_FAIL-EXPECTED` | `true` to assert failures expected (default `false`) |
+| `INPUT_FAIL_EXPECTED` | `true` to assert failures expected (default `false`) |
 | `INPUT_<PROVIDER>_API_KEY` | API key for the chosen provider |
+
+> **Names use underscores, not hyphens.** The Python tutor
+> (`gemini-python-tutor`) runs as a GitHub composite *action*, so GitHub
+> injects its `with:` inputs as `INPUT_REPORT-FILES` etc., and Python's
+> `os.environ` reads those hyphenated names fine. This Rust port is invoked
+> directly via `docker run -e`, and **`std::env::var` silently skips env
+> names containing `-`** — a hyphenated name reads as
+> `environment variable not found`. The caller (classroom.yml) passes the
+> underscore form; keep the two in sync.
 
 ## License
 
