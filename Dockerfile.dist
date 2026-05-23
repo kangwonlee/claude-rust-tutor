@@ -1,0 +1,11 @@
+# Minimal carrier image — published to ghcr.io for downstream `COPY --from`.
+# Downstream grader Dockerfiles do:
+#   COPY --from=ghcr.io/kangwonlee/claude-rust-tutor:vX.Y.Z /claude-rust-tutor /usr/local/bin/
+#
+# The `stage/${TARGETARCH}/` paths are populated by .github/workflows/build.yml
+# before `docker buildx build` runs.
+
+FROM scratch
+ARG TARGETARCH
+COPY stage/${TARGETARCH}/claude-rust-tutor /claude-rust-tutor
+ENTRYPOINT ["/claude-rust-tutor"]

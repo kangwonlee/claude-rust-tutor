@@ -1,0 +1,89 @@
+# Build + publish the static tutor binary to GHCR as a `FROM scratch` carrier image.
+# Downstream grader Dockerfiles consume via:
+#   COPY --from=ghcr.io/kangwonlee/claude-rust-tutor:vX.Y.Z /claude-rust-tutor /usr/local/bin/
+
+name: Build & publish tutor binary
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Cross-build static binary
+        run: cross build --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: claude-rust-tutor-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/claude-rust-tutor
+          retention-days: 7
+
+  publish:
+    # Publish image only on tag pushes (vX.Y.Z) — main pushes just build/test.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: Stage binaries by arch (buildx expects TARGETARCH path)
+        run: |
+          mkdir -p stage/amd64 stage/arm64
+          mv artifacts/claude-rust-tutor-amd64/claude-rust-tutor stage/amd64/claude-rust-tutor
+          mv artifacts/claude-rust-tutor-arm64/claude-rust-tutor stage/arm64/claude-rust-tutor
+          chmod +x stage/amd64/claude-rust-tutor stage/arm64/claude-rust-tutor
+
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push multi-arch carrier image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.dist
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/kangwonlee/claude-rust-tutor:${{ github.ref_name }}
+            ghcr.io/kangwonlee/claude-rust-tutor:latest
+          push: true

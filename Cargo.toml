@@ -1,0 +1,43 @@
+[package]
+name = "claude-rust-tutor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Multi-provider LLM-based coding tutor. Rust port of kangwonlee/gemini-python-tutor — reads test JSON + student code + README, calls an LLM, prints feedback."
+license = "BSD-3-Clause"
+repository = "https://github.com/kangwonlee/claude-rust-tutor"
+authors = ["Kangwon Lee"]
+publish = false
+
+[[bin]]
+name = "claude-rust-tutor"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP client — blocking (single sequential LLM call per invocation),
+# rustls-tls (no openssl native dep, clean static-link via musl).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+# JSON: pytest-json-report parsing + per-provider request/response shapes.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Regex-based input sanitization (port of prompt.py::sanitize_input).
+regex = "1"
+
+# Logging.
+log = "0.4"
+env_logger = "0.11"
+
+# Embed locale/*.json into the binary at compile time — runtime is fully
+# self-contained, no filesystem reads for locale strings.
+include_dir = "0.7"
+
+# Ergonomic error handling at the boundaries.
+anyhow = "1"
+
+[profile.release]
+# Size-tuned release profile for a small static binary in a scratch image.
+strip = true
+lto = "thin"
+codegen-units = 1
