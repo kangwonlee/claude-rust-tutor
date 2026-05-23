@@ -2,7 +2,7 @@
 
 Multi-provider LLM-based coding tutor in Rust. Port of [`kangwonlee/gemini-python-tutor`](https://github.com/kangwonlee/gemini-python-tutor), naming follows the convention "primary contributing LLM + impl language + tutor."
 
-**Status:** v0.1 scaffold. Compiles; no actual feedback generation yet. Implementation in progress.
+**Status:** v0.1.0 shipped 2026-05-23 — `ghcr.io/kangwonlee/claude-rust-tutor:v0.1.0` (multi-arch, ~2.17 MB amd64). Full prompt builder + 5-provider HTTP client + 19 unit tests. Smoke test against a real LLM API key still pending.
 
 ## Role
 
