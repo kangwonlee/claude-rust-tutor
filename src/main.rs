@@ -15,6 +15,7 @@ use std::process::ExitCode;
 mod llm;
 mod locale;
 mod prompt;
+mod prompt_policy;
 mod sanitize;
 
 fn main() -> ExitCode {
