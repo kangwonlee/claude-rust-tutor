@@ -31,7 +31,8 @@ impl Provider {
     pub fn api_url(&self) -> String {
         match self {
             Provider::Gemini { api_key, model } => format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+                key = api_key.trim()
             ),
             Provider::Claude { .. } => "https://api.anthropic.com/v1/messages".into(),
             Provider::Grok { .. } => "https://api.x.ai/v1/chat/completions".into(),
@@ -148,52 +149,133 @@ impl Provider {
     }
 }
 
-/// Mirror python's provider-selection order: Gemini → Claude → Grok → Nvidia → Perplexity.
-/// First non-empty `INPUT_*_API_KEY` wins. `INPUT_MODEL` overrides the per-provider default.
+/// Which provider a model name maps to. Mirrors the python tutor's
+/// `get_config_class` (llm_utils.py): a case-insensitive **prefix** match on
+/// the model id. `gemini*`→Gemini, `claude*`→Claude, `grok*`→Grok,
+/// `nvidia*`→NvidiaNIM, `sonar*`→Perplexity. Returns `None` for an unknown
+/// model so the caller can decide whether to error or fall back.
 ///
-/// All names use UNDERSCORES, not hyphens: a hyphenated name inherited from
-/// the process startup environment is invisible to `std::env::var` (libstd
-/// drops `-`-containing names from its inherited environ), so a hyphenated
-/// key is unreadable here even when `docker run -e` set it. See
+/// NOTE: python additionally maps the explicit nvidia model id
+/// `google/gemma-2-9b-it` to NvidiaNIM. We require an `INPUT_MODEL` that
+/// starts with `nvidia` to select NvidiaNIM here; the org default
+/// (`DEFAULT_MODEL`) does not use the gemma id, and the no-`INPUT_MODEL`
+/// key-order fallback below still reaches NvidiaNIM, so this is sufficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderKind {
+    Gemini,
+    Claude,
+    Grok,
+    NvidiaNim,
+    Perplexity,
+}
+
+fn provider_kind_for_model(model: &str) -> Option<ProviderKind> {
+    // Order is irrelevant: the prefixes are mutually exclusive.
+    let m = model.trim().to_ascii_lowercase();
+    if m.starts_with("gemini") {
+        Some(ProviderKind::Gemini)
+    } else if m.starts_with("claude") {
+        Some(ProviderKind::Claude)
+    } else if m.starts_with("grok") {
+        Some(ProviderKind::Grok)
+    } else if m.starts_with("nvidia") {
+        Some(ProviderKind::NvidiaNim)
+    } else if m.starts_with("sonar") {
+        Some(ProviderKind::Perplexity)
+    } else {
+        None
+    }
+}
+
+/// Build the chosen provider, reading its matching `INPUT_<provider>_API_KEY`.
+fn build_provider(kind: ProviderKind, model: String) -> anyhow::Result<Provider> {
+    let p = match kind {
+        ProviderKind::Gemini => Provider::Gemini {
+            api_key: require_key("INPUT_GEMINI_API_KEY", "Gemini")?,
+            model,
+        },
+        ProviderKind::Claude => Provider::Claude {
+            api_key: require_key("INPUT_CLAUDE_API_KEY", "Claude")?,
+            model,
+        },
+        ProviderKind::Grok => Provider::Grok {
+            api_key: require_key("INPUT_GROK_API_KEY", "Grok")?,
+            model,
+        },
+        ProviderKind::NvidiaNim => Provider::NvidiaNim {
+            api_key: require_key("INPUT_NVIDIA_API_KEY", "NvidiaNIM")?,
+            model,
+        },
+        ProviderKind::Perplexity => Provider::Perplexity {
+            api_key: require_key("INPUT_PERPLEXITY_API_KEY", "Perplexity")?,
+            model,
+        },
+    };
+    Ok(p)
+}
+
+/// Select the active LLM provider.
+///
+/// Primary path — mirror the python tutor (llm_utils.py `get_config_class`):
+/// when `INPUT_MODEL` is set, **select the provider FROM the model name** by
+/// prefix, and use that provider's matching `INPUT_<provider>_API_KEY`. This
+/// is what makes the org's `DEFAULT_MODEL` (passed as `INPUT_MODEL`) honored —
+/// e.g. a `claude-…` default picks Claude even when a Gemini key is also set.
+///
+/// Fallback path — only when `INPUT_MODEL` is empty: keep the historical
+/// first-non-empty-key order (Gemini → Claude → Grok → Nvidia → Perplexity)
+/// with each provider's default model.
+///
+/// All env names use UNDERSCORES, not hyphens: a hyphenated name inherited
+/// from the process startup environment is invisible to `std::env::var`
+/// (libstd drops `-`-containing names from its inherited environ), so a
+/// hyphenated key is unreadable here even when `docker run -e` set it. See
 /// `Inputs::from_env`.
 pub fn select_from_env() -> anyhow::Result<Provider> {
-    let model_override = env::var("INPUT_MODEL").ok().filter(|s| !s.is_empty());
+    let model_override = env::var("INPUT_MODEL").ok().filter(|s| !s.trim().is_empty());
 
+    // Primary: provider-by-model when INPUT_MODEL is set.
+    if let Some(model) = model_override {
+        match provider_kind_for_model(&model) {
+            Some(kind) => return build_provider(kind, model.trim().to_string()),
+            None => anyhow::bail!(
+                "INPUT_MODEL='{model}' does not match any known provider prefix \
+                 (gemini|claude|grok|nvidia|sonar)"
+            ),
+        }
+    }
+
+    // Fallback: no INPUT_MODEL — first non-empty key wins, with that
+    // provider's default model.
     if let Some(key) = nonempty("INPUT_GEMINI_API_KEY") {
-        return Ok(Provider::Gemini {
-            api_key: key,
-            model: model_override.unwrap_or_else(|| "gemini-2.5-flash".into()),
-        });
+        return Ok(Provider::Gemini { api_key: key, model: "gemini-2.5-flash".into() });
     }
     if let Some(key) = nonempty("INPUT_CLAUDE_API_KEY") {
-        return Ok(Provider::Claude {
-            api_key: key,
-            model: model_override.unwrap_or_else(|| "claude-sonnet-4-20250514".into()),
-        });
+        return Ok(Provider::Claude { api_key: key, model: "claude-sonnet-4-20250514".into() });
     }
     if let Some(key) = nonempty("INPUT_GROK_API_KEY") {
-        return Ok(Provider::Grok {
-            api_key: key,
-            model: model_override.unwrap_or_else(|| "grok-code-fast".into()),
-        });
+        return Ok(Provider::Grok { api_key: key, model: "grok-code-fast".into() });
     }
     if let Some(key) = nonempty("INPUT_NVIDIA_API_KEY") {
-        return Ok(Provider::NvidiaNim {
-            api_key: key,
-            model: model_override.unwrap_or_else(|| "google/gemma-2-9b-it".into()),
-        });
+        return Ok(Provider::NvidiaNim { api_key: key, model: "google/gemma-2-9b-it".into() });
     }
     if let Some(key) = nonempty("INPUT_PERPLEXITY_API_KEY") {
-        return Ok(Provider::Perplexity {
-            api_key: key,
-            model: model_override.unwrap_or_else(|| "sonar".into()),
-        });
+        return Ok(Provider::Perplexity { api_key: key, model: "sonar".into() });
     }
     anyhow::bail!("no LLM API key set in env (INPUT_*_API_KEY)")
 }
 
 fn nonempty(name: &str) -> Option<String> {
     env::var(name).ok().filter(|s| !s.trim().is_empty())
+}
+
+/// Read a required provider key; error with a clear message if missing/empty.
+fn require_key(name: &str, provider: &str) -> anyhow::Result<String> {
+    nonempty(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "INPUT_MODEL selected provider {provider}, but its key {name} is unset or empty"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -206,6 +288,32 @@ mod tests {
         let url = p.api_url();
         assert!(url.contains("gemini-2.5-flash:generateContent"));
         assert!(url.ends_with("?key=K"));
+    }
+
+    #[test]
+    fn gemini_url_trims_whitespace_from_key() {
+        // Regression: a key with a trailing newline (common from
+        // `$(cat secret)` style injection) must not break the URL. Every other
+        // provider trims; Gemini now does too.
+        let p = Provider::Gemini { api_key: "  K\n".into(), model: "gemini-2.5-flash".into() };
+        let url = p.api_url();
+        assert!(url.ends_with("?key=K"), "expected trimmed key, got: {url}");
+    }
+
+    #[test]
+    fn model_maps_to_provider_by_prefix() {
+        // `ProviderKind` + `provider_kind_for_model` are in scope via
+        // `use super::*` at the top of this module.
+        // Mirror python's get_config_class prefix match.
+        assert_eq!(provider_kind_for_model("gemini-2.5-flash"), Some(ProviderKind::Gemini));
+        assert_eq!(provider_kind_for_model("claude-sonnet-4-20250514"), Some(ProviderKind::Claude));
+        assert_eq!(provider_kind_for_model("grok-code-fast"), Some(ProviderKind::Grok));
+        assert_eq!(provider_kind_for_model("nvidia/llama"), Some(ProviderKind::NvidiaNim));
+        assert_eq!(provider_kind_for_model("sonar-pro"), Some(ProviderKind::Perplexity));
+        // Case-insensitive + whitespace-tolerant, like python's .lower().
+        assert_eq!(provider_kind_for_model("  Claude-3  "), Some(ProviderKind::Claude));
+        // Unknown -> None (caller errors).
+        assert_eq!(provider_kind_for_model("mistral-large"), None);
     }
 
     #[test]
@@ -288,6 +396,65 @@ mod tests {
 
         unsafe {
             env::remove_var("INPUT_CLAUDE_API_KEY");
+        }
+    }
+
+    // Regression for the p000 Gemini-400: with INPUT_MODEL set to a Claude
+    // model AND a Gemini key also present, the OLD first-non-empty-key order
+    // picked Gemini and sent a Claude default model to Gemini -> 400. The fix
+    // selects the provider FROM the model name, so Claude wins and uses the
+    // Claude key. This is the core behavior change.
+    #[test]
+    fn input_model_selects_provider_by_name_over_key_order() {
+        unsafe {
+            for k in ["INPUT_GEMINI_API_KEY", "INPUT_CLAUDE_API_KEY",
+                      "INPUT_GROK_API_KEY", "INPUT_NVIDIA_API_KEY",
+                      "INPUT_PERPLEXITY_API_KEY", "INPUT_MODEL"] {
+                env::remove_var(k);
+            }
+            // Both keys present; Gemini would win under the old order.
+            env::set_var("INPUT_GEMINI_API_KEY", "gem-key");
+            env::set_var("INPUT_CLAUDE_API_KEY", "claude-key");
+            env::set_var("INPUT_MODEL", "claude-sonnet-4-20250514");
+        }
+
+        let p = select_from_env().expect("claude model + claude key should resolve");
+        match p {
+            Provider::Claude { api_key, model } => {
+                assert_eq!(api_key, "claude-key");
+                assert_eq!(model, "claude-sonnet-4-20250514");
+            }
+            other => panic!("expected Claude provider from INPUT_MODEL, got {other:?}"),
+        }
+
+        unsafe {
+            for k in ["INPUT_GEMINI_API_KEY", "INPUT_CLAUDE_API_KEY", "INPUT_MODEL"] {
+                env::remove_var(k);
+            }
+        }
+    }
+
+    // When INPUT_MODEL names a provider whose key is missing, error clearly
+    // rather than silently falling through to another provider.
+    #[test]
+    fn input_model_without_matching_key_errors() {
+        unsafe {
+            for k in ["INPUT_GEMINI_API_KEY", "INPUT_CLAUDE_API_KEY",
+                      "INPUT_GROK_API_KEY", "INPUT_NVIDIA_API_KEY",
+                      "INPUT_PERPLEXITY_API_KEY", "INPUT_MODEL"] {
+                env::remove_var(k);
+            }
+            // Model selects Claude, but only a Gemini key is set.
+            env::set_var("INPUT_GEMINI_API_KEY", "gem-key");
+            env::set_var("INPUT_MODEL", "claude-sonnet-4-20250514");
+        }
+
+        assert!(select_from_env().is_err(), "missing Claude key should error");
+
+        unsafe {
+            for k in ["INPUT_GEMINI_API_KEY", "INPUT_MODEL"] {
+                env::remove_var(k);
+            }
         }
     }
 }
