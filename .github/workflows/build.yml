@@ -19,7 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --release
+      # Serial: the llm::providers tests mutate global process env (INPUT_*_API_KEY),
+      # which races under the default parallel test runner (flaky provider selection).
+      - run: cargo test --release -- --test-threads=1
 
   build:
     needs: test
