@@ -87,8 +87,9 @@ impl Provider {
                         "role": "user",
                         "content": format!("Please answer within {max_tokens} tokens\n{prompt}")
                     }],
-                    "temperature": 0.2,
-                    "top_p": 0.7,
+                    // NOTE: temperature/top_p omitted — deprecated on claude-sonnet-5 and newer
+                    // (the API 400s if either is sent). Older models accepted them; newer ones fix
+                    // the sampling internally. max_tokens + stream are still honored.
                     "max_tokens": max_tokens,
                     "stream": false,
                 })
